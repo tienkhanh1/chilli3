@@ -1,1 +1,1890 @@
-test3
+Section = PlantDTKTab:AddSection("Position Plant")
+-- Section gom mấy control liên quan
+-- khởi mặc định nếu chưa có
+config.AutoPlantSeedLoc      = config.AutoPlantSeedLoc      or false
+config.RandomOthersSeed      = config.RandomOthersSeed      or false
+config.SeedForLoc1           = config.SeedForLoc1           or {}
+config.SeedForLoc2           = config.SeedForLoc2           or {}
+config.SeedForLoc3           = config.SeedForLoc3           or {}
+config.SeedForLoc4           = config.SeedForLoc4           or {}
+config.ZoneSelector          = config.ZoneSelector          or { ["Zone 1 (right)"] = true, ["Zone 2 (left)"] = true }
+-- === Khai báo chung ===
+local ddLocation
+local selectedLocation = "Location 1"
+local locationList   = { "Location 1", "Location 2", "Location 3", "Location 4" }
+local locationCFrames = {}
+local selectedZones = {}
+local seedOptions    = {
+    "Nectarine","Hive Fruit","Sunflower","Purple Dahlia","Pink Lily","Carrot","Chocolate Carrot","Strawberry","Red Lollipop","Nightshade",
+    "Blueberry","Orange Tulip","Tomato","Raspberry","Candy Sunflower","Rose","Foxglove","Lilac",
+    "Glowshroom","Corn","Daffodil","Watermelon","Pumpkin","Apple","Bamboo",
+    "Peach","Pineapple","Dragon Fruit","Cactus","Coconut","Mango","Grape",
+    "Mushroom","Pepper","Cacao","Beanstalk","Easter Egg","Candy Blossom",
+    "Durian","Cranberry","Eggplant","Lotus","Venus Flytrap","Rainbow Sack",
+    "Papaya","Passionfruit","Banana","Cursed Fruit","Soul Fruit","Mint",
+    "Moonflower","Starfruit","Moonglow","Moon Blossom","Blood Banana","Moon Melon"
+}
+local selectedSeedsByLocation = {
+    ["Location 1"] = {},
+    ["Location 2"] = {},
+    ["Location 3"] = {},
+    ["Location 4"] = {}
+}
+
+local DEFAULT_Y = 0.135527045
+
+-- === 1) Toggle AutoPlantSeed (location) ===
+local autoPlantSeedLoc = false
+local randomOthersSeed = false
+plantAt = function(pos, name)
+    ReplicatedStore.GameEvents.Plant_RE:FireServer(pos, name)
+    local cf = CFrame.new(pos)
+    local gateway = Character.InputGateway or LocalPlayer.PlayerScripts.InputGateway
+    for _, s in ipairs({true,false}) do
+        gateway.Activation:FireServer(s, cf)
+        task.wait(0.01)
+    end
+end
+local sizeX, sizeY, sizeZ = 30.5, 0.001, 59
+local function randomPoint(cf)
+    local hx, hy, hz = sizeX/2, sizeY/2, sizeZ/2
+    return (cf * CFrame.new(
+        (math.random()*2-1)*hx,
+        (math.random()*2-1)*hy,
+        (math.random()*2-1)*hz
+    )).Position
+end
+
+
+-- === AutoPlantSeedLoc Logic ===
+plantseedB = PlantDTKTab:AddToggle("AutoPlantSeedLoc", {
+    Title       = "Auto Planting",
+    Description = "Planting by Location",
+    Default     = config.AutoPlantSeedLoc,
+    Callback    = function(state)
+        config.AutoPlantSeedLoc = state; saveConfig()
+        autoPlantSeedLoc = state
+        print("[AutoPlantSeedLoc] Toggled:", state)
+
+        if state then
+            task.spawn(function()
+                local hrp = Character:WaitForChild("HumanoidRootPart")
+                local lastTp = 0
+                local locNames = {"Location 1","Location 2","Location 3","Location 4"}
+
+                -- Lấy farm và Can_Plant parts
+                local farm = getMyFarm()
+                local plantLocFolder = farm and farm.Important:FindFirstChild("Plant_Locations")
+                if not plantLocFolder then
+                    warn("[AutoPlantSeedLoc] Không tìm thấy Plant_Locations!")
+                    return
+                end
+
+                -- Gom các Can_Plant vào mảng
+                local rawParts = {}
+                for _, cp in ipairs(plantLocFolder:GetChildren()) do
+                    if cp:IsA("BasePart") and cp.Name == "Can_Plant" then
+                        table.insert(rawParts, cp)
+                    end
+                end
+                if #rawParts < 2 then
+                    warn("[AutoPlantSeedLoc] Thiếu ít nhất 2 Can_Plant để xác định Zone!")
+                end
+
+                -- ---- CHÈN LOGIC KIỂM TRA ROTATION ----
+                -- part đầu tiên và thứ hai
+                local part1, part2 = rawParts[1], rawParts[2]
+                -- mặc định zoneParts giữ đúng thứ tự ban đầu
+                local zoneParts = { rawParts[1], rawParts[2] }
+                if part1 and part2 then
+                    -- lấy rotation Euler của từng part
+                    local r1 = part1.CFrame - part1.CFrame.Position
+                    local r2 = part2.CFrame - part2.CFrame.Position
+                    local angles1 = { r1:ToEulerAnglesXYZ() }
+                    local angles2 = { r2:ToEulerAnglesXYZ() }
+                    -- chuyển rad → deg và làm tròn
+                    for i=1,3 do
+                        angles1[i] = math.deg(angles1[i]) % 360
+                        angles1[i] = math.floor(angles1[i] + 0.5)
+                        angles2[i] = math.deg(angles2[i]) % 360
+                        angles2[i] = math.floor(angles2[i] + 0.5)
+                    end
+                    print(("[AutoPlantSeedLoc][Debug] Part1 Rot = (%d, %d, %d), Part2 Rot = (%d, %d, %d)")
+                          :format(angles1[1],angles1[2],angles1[3], angles2[1],angles2[2],angles2[3]))
+                    -- Nếu cả hai cùng (180,0,180) → part1 là Zone1
+                    if angles1[1]==180 and angles1[2]==0 and angles1[3]==180
+                    and angles2[1]==180 and angles2[2]==0 and angles2[3]==180 then
+                        zoneParts = { rawParts[1], rawParts[2] }
+                        print("[AutoPlantSeedLoc][Debug] Cả 2 part đều (180,0,180), giữ nguyên zoneParts.")
+                    -- Nếu cả hai cùng (0,0,0) → hoán đổi: part2 là Zone1, part1 là Zone2
+                    elseif angles1[1]==0 and angles1[2]==0 and angles1[3]==0
+                        and angles2[1]==0 and angles2[2]==0 and angles2[3]==0 then
+                        zoneParts = { rawParts[2], rawParts[1] }
+                        print("[AutoPlantSeedLoc][Debug] Cả 2 part đều (0,0,0), swap zoneParts.")
+                    else
+                        print("[AutoPlantSeedLoc][Debug] Không thỏa điều kiện, giữ nguyên thứ tự rawParts.")
+                    end
+                end
+
+                -- Xây mảng zoneCenters dựa trên zoneParts đã xác định
+                local zoneCenters = {}
+                for idx, part in ipairs(zoneParts) do
+                    zoneCenters[idx] = part.CFrame
+                end
+
+                -- Vòng lặp chính
+                while autoPlantSeedLoc do
+                    print("[AutoPlantSeedLoc] randomOthersSeed =", randomOthersSeed)
+                    for _, loc in ipairs(locNames) do
+                        if not autoPlantSeedLoc then break end
+
+                        local baseCF = locationCFrames[loc]
+                        local seeds  = selectedSeedsByLocation[loc]
+                        if not baseCF then
+                            warn("[AutoPlantSeedLoc] Skipping", loc, "- no CFrame saved")
+                        elseif not seeds or next(seeds)==nil then
+                            warn("[AutoPlantSeedLoc] Skipping", loc, "- no seeds selected")
+                        else
+                            local dx = (math.random()*2-1)*3
+                            local dz = (math.random()*2-1)*3
+                            local plantPos = Vector3.new(
+                                baseCF.Position.X + dx,
+                                baseCF.Position.Y,
+                                baseCF.Position.Z + dz
+                            )
+
+                            for seedName, on in pairs(seeds) do
+                                if not autoPlantSeedLoc then break end
+                                if on then
+                                    local foundTool
+                                    for _,container in ipairs({LocalPlayer.Backpack, Character}) do
+                                        for _,tool in ipairs(container:GetChildren()) do
+                                            if tool:IsA("Tool")
+                                            and tool.Name:find(seedName.." Seed")
+                                            and tool.Name:find("%[X%d+%]") then
+                                                foundTool = tool; break
+                                            end
+                                        end
+                                        if foundTool then break end
+                                    end
+                                    if not foundTool then
+                                        warn("[AutoPlantSeedLoc] Tool not found:", seedName)
+                                        continue
+                                    end
+
+                                    -- teleport về spawnPointPart nếu cần
+                                    if spawnPointPart and tick()-lastTp >= 3 then
+                                        hrp.CFrame = spawnPointPart.CFrame + Vector3.new(0,-2,0)
+                                        task.wait(0.05)
+                                        lastTp = tick()
+                                    end
+                                    while isTeleport do task.wait(0.02) end
+                                    isTeleport = true
+
+                                    Humanoid:EquipTool(foundTool)
+                                    task.wait(0.1)
+                                    print(("[AutoPlantSeedLoc] Equipped %s for %s"):format(seedName, loc))
+
+                                    local success, err = pcall(function()
+                                        plantAt(plantPos, seedName)
+                                    end)
+                                    isTeleport = false
+                                    if success then
+                                        print(("[AutoPlantSeedLoc] Planted %s at %s"):format(
+                                            seedName, tostring(plantPos)
+                                        ))
+                                    else
+                                        warn("[AutoPlantSeedLoc] Error planting:", err)
+                                    end
+                                    
+                                    task.wait(0.1)
+                                end
+                            end
+                        end
+                    end
+
+                    -- Phần randomOthersSeed (giữ nguyên)
+                    if randomOthersSeed then
+                        -- build filtered centers theo selectedZones
+                        local centersFiltered = {}
+                        for idx, cf in ipairs(zoneCenters) do
+                            if selectedZones["Zone "..idx] then
+                                table.insert(centersFiltered, cf)
+                            end
+                        end
+                        if #centersFiltered == 0 then
+                            warn("[AutoPlantSeedLoc] No zone selected, skipping RandomOthersSeed")
+                        else
+                            -- Xây blacklist từ seeds đã được dùng ở 4 location
+                            local used = {}
+                            for _, loc in ipairs(locNames) do
+                                for seedName, on in pairs(selectedSeedsByLocation[loc]) do
+                                    if on then used[seedName] = true end
+                                end
+                            end
+
+                            -- Tạo danh sách seed *thật* trong inventory (Backpack + Character)
+                            local invSeeds = {}
+                            for _, container in ipairs({LocalPlayer.Backpack, Character}) do
+                                for _, tool in ipairs(container:GetChildren()) do
+                                    if tool:IsA("Tool") then
+                                        -- tìm seed: name chứa " Seed" và [Xn]
+                                        local name = tool.Name
+                                        local seedName = name:match("(.+) Seed")
+                                        if seedName and name:find("%[X%d+%]") then
+                                            -- nếu chưa dùng và chưa nằm trong invSeeds thì thêm
+                                            if not used[seedName] and not invSeeds[seedName] then
+                                                invSeeds[seedName] = true
+                                            end
+                                        end
+                                    end
+                                end
+                            end
+
+                            -- Chuyển invSeeds (map) thành mảng
+                            local avail = {}
+                            for seedName,_ in pairs(invSeeds) do
+                                table.insert(avail, seedName)
+                            end
+
+                            if #avail == 0 then
+                                warn("[RandomOthersSeed] No available seeds in inventory to random plant")
+                            else
+                                -- Chọn và trồng 2 seed ngẫu nhiên từ avail
+                                for i = 1, 2 do
+                                    if #avail == 0 then break end
+                                    local idx = math.random(#avail)
+                                    local seedName = table.remove(avail, idx)
+
+                                    -- random center
+                                    local cfCenter = centersFiltered[math.random(#centersFiltered)]
+                                    local plantPos = randomPoint(cfCenter)
+
+                                    -- teleport nếu cần
+                                    if spawnPointPart and tick() - lastTp >= 3 then
+                                        hrp.CFrame = spawnPointPart.CFrame + Vector3.new(0, -2, 0)
+                                        task.wait(0.05)
+                                        lastTp = tick()
+                                    end
+
+                                    -- tìm tool seed trong inventory
+                                    local toolFound
+                                    for _,container in ipairs({LocalPlayer.Backpack, Character}) do
+                                        for _, tool in ipairs(container:GetChildren()) do
+                                            if tool:IsA("Tool")
+                                            and tool.Name:find(seedName.." Seed")
+                                            and tool.Name:find("%[X%d+%]") then
+                                                toolFound = tool
+                                                break
+                                            end
+                                        end
+                                        if toolFound then break end
+                                    end
+                                    if not toolFound then
+                                        warn("[RandomOthersSeed] Tool not found for", seedName)
+                                        continue
+                                    end
+
+                                    -- Equip tool và plant
+                                    Humanoid:EquipTool(toolFound)
+                                    task.wait(0.1)
+                                    pcall(function()
+                                        plantAt(plantPos, seedName)
+                                    end)
+                                    print(("[RandomOthersSeed] Planted %s at %s"):format(seedName, tostring(plantPos)))
+                                    task.wait(0.2)
+                                end
+                            end
+                        end
+                    end
+                    task.wait(0.5)
+                end
+                print("[AutoPlantSeedLoc] Stopped")
+            end)
+        end
+    end
+})
+
+
+plantseedA:OnChanged(function(state)
+    if state then
+        -- nếu bật B thì tắt A
+        plantseedB:SetValue(false)
+    end
+end)
+
+plantseedB:OnChanged(function(state)
+    if state then
+        -- nếu bật B thì tắt A
+        plantseedA:SetValue(false)
+    end
+end)
+
+
+-- === 2) Button “Lưu Location” ===
+PlantDTKTab:AddButton({
+    Title       = ("Save Location"):format(selectedLocation),
+    Description = "Click to save Location",
+    Callback    = function()
+        if not ddLocation then return end
+
+        local cf = hrp.CFrame
+        local x, z = cf.X, cf.Z
+
+        -- 1) Lưu CFrame với Y cố định
+        locationCFrames[selectedLocation] = CFrame.new(x, DEFAULT_Y, z)
+
+        -- 2) Đổi tên dropdown hiển thị, Y hiển thị = 0
+        local shortName = string.format(
+            "%s: %d, %d, %d",
+            selectedLocation,
+            x,
+            0,
+            z
+        )
+        for i, name in ipairs(locationList) do
+            if name:find(selectedLocation) then
+                locationList[i] = shortName
+                break
+            end
+        end
+        ddLocation:SetValues(locationList)
+        ddLocation:SetValue(shortName)
+
+        -- 3) Xoá marker cũ cho location này nếu có
+        local markerName = "Marker_" .. selectedLocation:gsub(" ", "")
+        local old = workspace:FindFirstChild(markerName)
+        if old then old:Destroy() end
+
+        -- 4) Tạo marker 3D với BillboardGui
+        local part = Instance.new("Part")
+        part.Name         = markerName
+        part.Size         = Vector3.new(1,1,1)
+        part.Transparency = 1
+        part.Anchored     = true
+        part.CanCollide   = false
+        part.CFrame       = locationCFrames[selectedLocation]
+        part.Parent       = workspace
+
+        local bb = Instance.new("BillboardGui", part)
+        bb.Name          = "LocationMarker"
+        bb.Adornee       = part
+        bb.AlwaysOnTop   = false
+        bb.ExtentsOffset = Vector3.new(0,5,0)
+        bb.Size          = UDim2.new(0,100,0,40)
+
+        local lbl = Instance.new("TextLabel", bb)
+        lbl.Size                   = UDim2.fromScale(1,1)
+        lbl.BackgroundTransparency = 1
+        lbl.Font                   = Enum.Font.SourceSansBold
+        lbl.Text                   = selectedLocation
+        lbl.TextColor3             = Color3.new(0.1, 0.8, 0.1)
+        lbl.TextStrokeTransparency = 0.5
+        lbl.TextScaled             = true
+    end
+})
+
+-- === 3) Dropdown chọn Location hiện tại ===
+ddLocation = PlantDTKTab:AddDropdown("LocationSelector", {
+    Title       = "Location to save",
+    Description = "",
+    Values      = locationList,
+    Default     = selectedLocation,
+    Callback    = function(val)
+        selectedLocation = val:match("^Location %d") or val
+    end
+})
+
+-- === 4–7) Bốn Multi‑Dropdown “Seed for Location X” ===
+dropdownSeedForLoc1 = PlantDTKTab:AddDropdown("SeedForLoc1", {
+    Title       = "Seeds for Location 1",
+    Description = "",
+    Values      = seedOptions,
+    Multi       = true,
+    Default     = config.SeedForLoc1,
+    Callback    = function(sel)
+        config.SeedForLoc1 = sel; saveConfig()
+        selectedSeedsByLocation["Location 1"] = sel
+    end
+})
+dropdownSeedForLoc1:SetValue(config.SeedForLoc1)
+
+dropdownSeedForLoc2 = PlantDTKTab:AddDropdown("SeedForLoc2", {
+    Title       = "Seeds for Location 2",
+    Description = "",
+    Values      = seedOptions,
+    Multi       = true,
+    Default     = config.SeedForLoc2,
+    Callback    = function(sel)
+        config.SeedForLoc2 = sel; saveConfig()
+        selectedSeedsByLocation["Location 2"] = sel
+    end
+})
+dropdownSeedForLoc2:SetValue(config.SeedForLoc2)
+
+dropdownSeedForLoc3 = PlantDTKTab:AddDropdown("SeedForLoc3", {
+    Title       = "Seeds for Location 3",
+    Description = "",
+    Values      = seedOptions,
+    Multi       = true,
+    Default     = config.SeedForLoc3,
+    Callback    = function(sel)
+        config.SeedForLoc3 = sel; saveConfig()
+        selectedSeedsByLocation["Location 3"] = sel
+    end
+})
+dropdownSeedForLoc3:SetValue(config.SeedForLoc3)
+
+dropdownSeedForLoc4 = PlantDTKTab:AddDropdown("SeedForLoc4", {
+    Title       = "Seeds for Location 4",
+    Description = "",
+    Values      = seedOptions,
+    Multi       = true,
+    Default     = config.SeedForLoc4,
+    Callback    = function(sel)
+        config.SeedForLoc4 = sel; saveConfig()
+        selectedSeedsByLocation["Location 4"] = sel
+    end
+})
+dropdownSeedForLoc4:SetValue(config.SeedForLoc4)
+
+-- === 8) Toggle Random Others Seed ===
+
+PlantDTKTab:AddToggle("RandomOthersSeed", {
+    Title   = "Random Other Seeds",
+    Description = "Random planting other Seeds",
+    Default = config.RandomOthersSeed,
+    Callback = function(state)
+        config.RandomOthersSeed = state; saveConfig()
+        randomOthersSeed = state
+        print("", state)
+    end
+})
+
+-- === 9) Multi Dropdown chọn Zone ===
+zoneDropdown = PlantDTKTab:AddDropdown("ZoneSelector", {
+    Title       = "Zone selector (for random)",
+    Description = "",
+    Values      = {"Zone 1 (right)", "Zone 2 (left)"},
+    Multi       = true,
+    Default     = config.ZoneSelector,
+    Callback    = function(sel)
+        config.ZoneSelector  = sel; saveConfig()
+        selectedZones = sel
+        print("", table.concat(sel, ", "))
+    end
+})
+zoneDropdown:SetValue(config.ZoneSelector)
+
+
+
+-- Thêm section nếu cần
+
+
+-- Giả sử bạn đã có biến TeleportDTKTab tham chiếu tới tab Teleport
+-- và LocalPlayer, Character, HumanoidRootPart (hrp) đã được khởi tạo sẵn
+
+TeleportDTKTab:AddButton({
+    Title       = "Tp to Cosmetic Npc",
+    Description = "",
+    Callback    = function()
+        -- Lấy HumanoidRootPart của Chippy
+        local chippyModel = workspace:FindFirstChild("NPCS")
+                              and workspace.NPCS:FindFirstChild("CosmeticStand")
+                              and workspace.NPCS.CosmeticStand:FindFirstChild("Chippy")
+        if not chippyModel then
+            warn("")
+            return
+        end
+
+        local targetHRP = chippyModel:FindFirstChild("HumanoidRootPart")
+        if not targetHRP then
+            warn("")
+            return
+        end
+
+        -- Tọa độ nhân vật
+        local playerChar = LocalPlayer.Character
+        if not playerChar then
+            warn("")
+            return
+        end
+
+        local hrp = playerChar:FindFirstChild("HumanoidRootPart")
+        if not hrp then
+            warn("")
+            return
+        end
+
+        -- Tính CFrame đích: 5 studs trước mặt Chippy
+        -- Chippy hướng theo targetHRP.CFrame.LookVector
+        local lookVec = targetHRP.CFrame.LookVector
+        local destinationCF = CFrame.new(
+            targetHRP.Position - lookVec * -5,   -- lùi 5 studs theo LookVector
+            targetHRP.Position                  -- nhìn về hướng Chippy
+        )
+        -- Giữ cùng orientation với camera hoặc xoay thẳng về NPC
+        -- nếu chỉ cần đặt vị trí: 
+        -- local destinationCF = targetHRP.CFrame * CFrame.new(0, 0, -5)
+
+        -- Teleport nhân vật
+        hrp.CFrame = destinationCF
+
+    end
+})
+
+TeleportDTKTab:AddButton({
+    Title = "Tp to Honey Queen",
+    Callback = function()
+        -- Lấy folder thứ 5 trong HoneyEvent
+        local honeyEventFolder = workspace:WaitForChild("Interaction")
+                                      :WaitForChild("UpdateItems")
+                                      :WaitForChild("HoneyEvent")
+        local fifthChild = honeyEventFolder:GetChildren()[5]
+        if not fifthChild then
+            warn("")
+            return
+        end
+
+        -- Lấy Part con có tên "26"
+        local targetFolder = fifthChild:FindFirstChild("26")
+        if not targetFolder then
+            warn("")
+            return
+        end
+
+        local target = targetFolder:FindFirstChild("Part")
+        if target and target:IsA("BasePart") then
+            -- Dịch cao lên 1 stud so với vị trí Part
+            local newCFrame = CFrame.new(target.Position + Vector3.new(0, 3, 0))
+            -- Teleport người chơi
+            local hrp = Character:WaitForChild("HumanoidRootPart")
+            hrp.CFrame = newCFrame
+        else
+            warn("")
+        end
+    end
+})
+
+
+
+
+
+Section = TeleportDTKTab:AddSection("Players Teleport")
+-- === 0) Khởi tạo config để lưu Selection ===
+config.TeleportPlayer = config.TeleportPlayer or nil
+
+-- === 1) Biến chung ===
+  -- giả sử bạn có tab này
+local teleDropdown   = nil
+local playerNames    = {}   -- mảng tên model
+local selectedTarget = config.TeleportPlayer
+
+-- Hàm lấy tất cả model player trong workspace
+local function rebuildPlayerList()
+    playerNames = {}
+    for _, inst in ipairs(workspace:GetChildren()) do
+        -- Lọc ra Model có Humanoid và có con HumanoidRootPart
+        if inst:IsA("Model") and inst:FindFirstChild("Humanoid") 
+        and inst:FindFirstChild("HumanoidRootPart") then
+            table.insert(playerNames, inst.Name)
+        end
+    end
+    table.sort(playerNames)      -- optional: sắp xếp theo chữ
+end
+
+-- === 2) Tạo UI ===
+-- A) nút Refresh
+TeleportDTKTab:AddButton({
+    Title       = "Refresh Player List",
+    Description = "",
+    Callback    = function()
+        rebuildPlayerList()
+        if teleDropdown then
+            teleDropdown:SetValues(playerNames)
+            -- nếu config.TP đã có nhưng không còn trong list thì clear
+            if not table.find(playerNames, selectedTarget) then
+                selectedTarget = nil
+                config.TeleportPlayer = nil; saveConfig()
+            end
+            teleDropdown:SetValue(selectedTarget or playerNames[1])
+        end
+    end
+})
+
+-- B) Dropdown Teleport
+teleDropdown = TeleportDTKTab:AddDropdown("TeleportPlayer", {
+    Title       = "Choose a Player to TP",
+    Description = "",
+    Values      = playerNames,
+    Default     = selectedTarget,
+    Callback    = function(val)
+        selectedTarget = val
+        config.TeleportPlayer = val; saveConfig()
+    end
+})
+
+-- C) Button Thực thi Teleport
+TeleportDTKTab:AddButton({
+    Title       = "Teleport Now",
+    Description = "",
+    Callback    = function()
+        if not selectedTarget then
+            warn("")
+            return
+        end
+        local targetModel = workspace:FindFirstChild(selectedTarget)
+        if targetModel 
+        and targetModel:FindFirstChild("HumanoidRootPart") then
+            local hrp = Character:FindFirstChild("HumanoidRootPart") 
+                        or Character.PrimaryPart
+            if hrp then
+                hrp.CFrame = targetModel.HumanoidRootPart.CFrame
+                print((""):format(selectedTarget))
+            else
+                warn("")
+            end
+        else
+            warn((""):format(selectedTarget))
+        end
+    end
+})
+
+
+-- === 3) Khởi chạy lần đầu ===
+rebuildPlayerList()
+teleDropdown:SetValues(playerNames)
+-- nếu config có value và tồn tại thì set, ngược lại mặc định chọn first
+if table.find(playerNames, selectedTarget) then
+    teleDropdown:SetValue(selectedTarget)
+else
+    selectedTarget = playerNames[1]
+    teleDropdown:SetValue(selectedTarget)
+    config.TeleportPlayer = selectedTarget; saveConfig()
+end
+
+
+
+
+Section = FavoriteDTKTab:AddSection("Favorite Fruits")
+-- ======= Auto Favorite Fruits =======
+-- 0) Config mặc định
+config.AutoFavFruit          = config.AutoFavFruit          or false
+config.FavFruitSelection     = config.FavFruitSelection     or { All = true }
+config.FavMutSelection       = config.FavMutSelection       or {}
+config.FavWeightThreshold    = config.FavWeightThreshold    or 5   -- đưa threshold vào config luôn
+
+-- Khởi tạo biến runtime từ config
+local weightThresholdF = config.FavWeightThreshold
+
+-- 1) Multi-Dropdown: Chọn loại trái
+local fruitOptions = {
+    "All","Nectarine","Hive Fruit","Sunflower","Purple Dahlia","Pink Lily","Carrot","Chocolate Carrot","Strawberry","Red Lollipop","Nightshade",
+    "Blueberry","Orange Tulip","Tomato","Raspberry","Candy Sunflower","Rose","Foxglove","Lilac",
+    "Glowshroom","Corn","Daffodil","Watermelon","Pumpkin","Apple","Bamboo",
+    "Peach","Pineapple","Dragon Fruit","Cactus","Coconut","Mango","Grape",
+    "Mushroom","Pepper","Cacao","Beanstalk","Easter Egg","Candy Blossom",
+    "Durian","Cranberry","Eggplant","Lotus","Venus Flytrap","Rainbow Sack",
+    "Papaya","Passionfruit","Banana","Cursed Fruit","Soul Fruit","Mint",
+    "Moonflower","Starfruit","Moonglow","Moon Blossom","Blood Banana","Moon Melon"
+}
+local mutationOptions = {
+    "Pollinated", "Choc", "Celestial","Shocked","Rainbow","Gold","Plasma","Voidtouched","HoneyGlazed","Frozen","Bloodlit","Wet",
+    "Zombified","Chilled","Disco"
+}
+
+-- 2) Toggle: Auto-favorite
+-- 2) Toggle: Auto-favorite
+FavoriteDTKTab:AddToggle("AutoFavFruit", {
+    Title   = "Auto favorite fruit",
+    Default = config.AutoFavFruit,
+    Callback = function(state)
+        config.AutoFavFruit = state
+        saveConfig()
+        autoFavFruit = state
+
+        if state then
+            -- 1) Khởi tạo set những tool đã favorite sẵn (cả lần trước), dùng object tool làm key
+            local alreadyFavored = {}
+            for _, tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+                if tool:IsA("Tool") and tool:GetAttribute("Favorite") then
+                    alreadyFavored[tool] = true
+                end
+            end
+
+            task.spawn(function()
+                local plr = Players.LocalPlayer
+                local favRemote = ReplicatedStorage
+                    :WaitForChild("GameEvents")
+                    :WaitForChild("Favorite_Item")
+
+                while autoFavFruit do
+                    for _, tool in ipairs(plr.Backpack:GetChildren()) do
+                        if not tool:IsA("Tool") then
+                            continue
+                        end
+
+                        -- Nếu đã favorite tool này rồi (theo object, không phải theo name), bỏ qua
+                        if alreadyFavored[tool] then
+                            continue
+                        end
+
+                        local name = tool.Name
+
+                        -- lọc “kg”
+                        if not name:lower():find("kg") then
+                            continue
+                        end
+
+                        -- lọc loại trái
+                        local okType = config.FavFruitSelection.All
+                        if not okType then
+                            okType = false
+                            for ft, on in pairs(config.FavFruitSelection) do
+                                if on and ft ~= "All" and name:find(ft) then
+                                    okType = true
+                                    break
+                                end
+                            end
+                        end
+                        if not okType then
+                            continue
+                        end
+
+                        -- lọc mutation
+                        local okMut = true
+                        local anyMutSelected = false
+                        for mut, on in pairs(config.FavMutSelection) do
+                            if mut ~= "All" and on then
+                                anyMutSelected = true
+                                if name:find(mut) then
+                                    okMut = true
+                                    break
+                                else
+                                    okMut = false
+                                end
+                            end
+                        end
+                        -- Nếu có chọn mutation mà không tool nào khớp → continue
+                        if anyMutSelected and not okMut then
+                            continue
+                        end
+
+                        -- lọc weight
+                        local wtStr = name:match("([%d%.]+)kg")
+                        local wnum  = wtStr and tonumber(wtStr) or 0
+                        if wnum <= config.FavWeightThreshold then
+                            continue
+                        end
+
+                        -- call remote favorite (dùng luôn tool chứ không phải tên)
+                        pcall(function()
+                            favRemote:FireServer(tool)
+                        end)
+
+                        -- đánh dấu đã favorite tool này
+                        alreadyFavored[tool] = true
+
+                        task.wait(0.02)
+                    end
+                    task.wait(0.02)
+                end
+            end)
+        end
+    end
+})
+
+
+
+-- 3) Multi-Dropdown Fruits Filter
+ddFruit = FavoriteDTKTab:AddDropdown("FavFruitFilter", {
+    Title       = "Fruits Filter",
+    Description = "Fruits for favorite",
+    Values      = fruitOptions,
+    Multi       = true,
+    Default     = config.FavFruitSelection,
+    Callback    = function(sel)
+        config.FavFruitSelection = sel
+        saveConfig()
+    end
+})
+ddFruit:SetValue(config.FavFruitSelection)
+
+-- 4) Multi-Dropdown Mutation Filter
+ddMut = FavoriteDTKTab:AddDropdown("FavMutFilter", {
+    Title       = "Mutation Filter",
+    Description = "Mutation for favorite",
+    Values      = mutationOptions,
+    Multi       = true,
+    Default     = config.FavMutSelection,
+    Callback    = function(sel)
+        config.FavMutSelection = sel
+        saveConfig()
+    end
+})
+ddMut:SetValue(config.FavMutSelection)
+
+-- 5) Input: weight threshold
+weightfilterfav = FavoriteDTKTab:AddInput("WeightThreshold", {
+    Title       = "WeightThreshold",
+    Description = "Favorite fruits ≥ x",
+    Placeholder = "",
+    Default     = tostring(config.FavWeightThreshold),
+    Numeric     = true,
+    Callback    = function(v)
+        local num = tonumber(v)
+        if num then
+            weightThresholdF = num
+            config.FavWeightThreshold = num
+            saveConfig()
+        else
+            warn("!")
+        end
+    end
+})
+weightfilterfav:SetValue(config.FavWeightThreshold)
+
+FavoriteDTKTab:AddButton({
+    Title       = "Unfavorite All Fruits",
+    Description = "",
+    Callback    = function()
+        local plr = Players.LocalPlayer
+        local favRemote = ReplicatedStorage
+            :WaitForChild("GameEvents")
+            :WaitForChild("Favorite_Item")
+
+        -- Duyệt Backpack
+        for _, tool in ipairs(plr.Backpack:GetChildren()) do
+            if tool:IsA("Tool") and tool:GetAttribute("Favorite") then
+                -- Gọi Remote để unfavorite
+                pcall(function()
+                    favRemote:FireServer(tool)
+                end)
+                task.wait(0.05)
+            end
+        end
+
+        -- Duyệt Character (trường hợp đang cầm tool)
+        for _, tool in ipairs(plr.Character:GetChildren()) do
+            if tool:IsA("Tool") and tool:GetAttribute("Favorite") then
+                pcall(function()
+                    favRemote:FireServer(tool)
+                end)
+                task.wait(0.05)
+            end
+        end
+
+    end
+})
+
+
+
+
+local startTime = tick()
+local uptimeParagraph = ServerDTKTab:AddParagraph({
+    Title   = "Server Timing",
+    Content = ("Hour: %02d, Minute: %02d, Second: %02d")
+              :format(0, 0, 0)
+})
+
+-- Spawn một luồng để update mỗi giây
+task.spawn(function()
+    while true do
+        local elapsed = math.floor(tick() - startTime)
+        local hrs  = math.floor(elapsed / 3600)
+        local mins = math.floor((elapsed % 3600) / 60)
+        local secs = elapsed % 60
+        local newText = ("Hour: %02d, Minute: %02d, Second: %02d")
+                        :format(hrs, mins, secs)
+
+        -- Quét và set lại text cho label chứa uptime
+        for _, desc in ipairs(uptimeParagraph.Frame:GetDescendants()) do
+            if desc:IsA("TextLabel") and desc.Text:match("Hour:") then
+                desc.Text = newText
+            end
+        end
+
+        task.wait(1)
+    end
+end)
+
+-- 2) Hàm format & cập nhật lại
+local function updateUptime()
+    local elapsed = math.floor(tick() - startTime)
+    local hrs  = math.floor(elapsed / 3600)
+    local mins = math.floor((elapsed % 3600) / 60)
+    local secs = elapsed % 60
+
+    local newText = ("Hour: %02d, Minute: %02d, Second: %02d")
+                    :format(hrs, mins, secs)
+
+    -- Tùy API của lib UI, dùng method phù hợp:
+    if uptimeParagraph.SetContent then
+        uptimeParagraph:SetContent(newText)
+    elseif uptimeParagraph.SetValue then
+        uptimeParagraph:SetValue(newText)
+    else
+        -- Nếu control lưu text ở .Content
+        uptimeParagraph.Content = newText
+    end
+end
+
+-- 3) Vòng loop cập nhật mỗi 1s
+spawn(function()
+    while true do
+        updateUptime()
+        task.wait(1)
+    end
+end)
+-- 1) Tạo Paragraph hiển thị thời gian khởi động
+-- Giả sử bạn đã gọi
+
+
+
+
+-- Giả sử bạn đã có biến ServerDTKTab (ví dụ do Fluent UI tạo)
+-- local ServerDTKTab = Window:MakeTab("Server", ...)
+local jobIdInput
+ServerDTKTab:AddInput("JobIdInput", {
+    Title       = "Join JobId",
+    Placeholder = "",
+    Default     = "",
+    Numeric     = false, -- JobId có chữ nên false
+    Finished    = false, -- không gọi callback onEnter, ta dùng nút bấm
+    Callback    = function(txt)
+        jobIdInput = txt
+        -- Bạn có thể in debug:
+        print("", jobIdInput)
+    end
+})
+-- 3) Thêm Button “Join ID”
+ServerDTKTab:AddButton({
+    Title       = "Join ID",
+    Description = "",
+    Callback    = function()
+        -- Lấy giá trị từ jobIdInput
+        local jobId = jobIdInput or ""
+        jobId = jobId:match("%S+") or "" -- trim
+        if jobId == "" then
+            warn("[JoinJob] !")
+            return
+        end
+
+        -- Lấy PlaceId hiện tại
+        local placeId = game.PlaceId
+
+        -- Thực hiện teleport
+        print((""):format(placeId, jobId))
+        pcall(function()
+            TeleportService:TeleportToPlaceInstance(placeId, jobId, LocalPlayer)
+        end)
+    end
+})
+-- Tạo nút
+ServerDTKTab:AddButton({
+    Title       = "Copy Job ID",
+    Description = "",
+    Callback    = function()
+        -- Lấy Job ID
+        local jobId = game.JobId or ""
+        if jobId == "" then
+            warn("[CopyJobId]  JobId!")
+            return
+        end
+
+        -- Đưa vào clipboard (chỉ hoạt động trên studio hoặc môi trường hỗ trợ setclipboard)
+        pcall(function()
+            setclipboard(jobId)
+        end)
+
+        -- Thông báo cho user
+        print("", jobId)
+    end
+})
+
+
+
+
+
+
+
+Section = RemoveDTKTab:AddSection("Destroy Plants")
+
+-- ========== Phần đầu: Khai báo helper & config ==========
+
+local Players           = game:GetService("Players")
+local ReplicatedStorage = game:GetService("ReplicatedStorage")
+local LocalPlayer       = Players.LocalPlayer
+
+-- Module tính value/mutation (giả sử đã require ở đầu file)
+local ItemModule       = require(ReplicatedStorage:WaitForChild("Item_Module"))
+local MutationHandler  = require(ReplicatedStorage.Modules:WaitForChild("MutationHandler"))
+
+-- Remote event để phá cây
+local RemoveItemEvent = ReplicatedStorage
+    :WaitForChild("GameEvents")
+    :WaitForChild("Remove_Item")
+
+-- Config mặc định
+config.AutoRemoveTrees       = config.AutoRemoveTrees       or false
+config.ZoneRemoveFilter      = config.ZoneRemoveFilter      or { ["Zone 1 (right)"]=true, ["Zone 2 (left)"]=true }
+config.PlantRemoveFilter     = config.PlantRemoveFilter     or { ["All"]=true }      -- nếu để {} tức mặc định KHÔNG chọn cây nào
+config.WeightRemoveFilter    = config.WeightRemoveFilter    or "20"
+config.ValueRemoveFilter     = config.ValueRemoveFilter     or "10000000"
+config.MutationRemoveFilter  = config.MutationRemoveFilter  or {}
+
+-- State
+local autoRemove        = false
+local selectedZones     = {}   -- map["Zone 1"]=true/false,...
+local selectedPlants    = {}   -- map["Carrot"]=true/false,..
+local weightThreshold   = tonumber(config.WeightRemoveFilter) or 0
+local valueThreshold    = tonumber(config.ValueRemoveFilter)  or 0
+local blockedMutions    = {}   -- map mutation→true
+
+
+-- Khởi selectedZones từ config
+for zone, on in pairs(config.ZoneRemoveFilter) do
+    if on then selectedZones[zone] = true end
+end
+
+
+-- ========== Helper functions ==========
+
+-- Lấy farm của người chơi
+local function getMyFarm()
+    for _, f in ipairs(workspace:WaitForChild("Farm"):GetChildren()) do
+        local imp = f:FindFirstChild("Important")
+        local data = imp and imp:FindFirstChild("Data")
+        if data and data:FindFirstChild("Owner") and data.Owner.Value == LocalPlayer.Name then
+            return f
+        end
+    end
+    return nil
+end
+
+-- Tính tổng value của cây
+local function calcPlantValue(plantModel)
+    local sum = 0
+    local fruits = plantModel:FindFirstChild("Fruits")
+    if fruits then
+        for _, fruit in ipairs(fruits:GetChildren()) do
+            if fruit:IsA("Model") then
+                local name   = (fruit:FindFirstChild("Item_String") and fruit.Item_String.Value) or fruit.Name
+                local varObj = fruit:FindFirstChild("Variant")
+                local wObj   = fruit:FindFirstChild("Weight")
+                if varObj and wObj then
+                    local data = ItemModule.Return_Data(name)
+                    if data and #data >= 3 then
+                        local tier = data[2]
+                        local base = data[3]
+                        local vm   = ItemModule.Return_Multiplier(varObj.Value) or 1
+                        local mm   = MutationHandler:CalcValueMulti(fruit)
+                        local r    = math.clamp(wObj.Value / tier, 0.95, 1e8)
+                        sum += math.round(base * vm * mm * (r*r))
+                    end
+                end
+            end
+        end
+    end
+    return sum
+end
+
+-- Xác định zone 1 / zone 2 dựa trên rotation của hai part "Can_Plant"
+local zoneParts = {}
+do
+    local farm = getMyFarm()
+    if farm then
+        local locs = farm.Important:WaitForChild("Plant_Locations")
+        local raw  = {}
+        for _, p in ipairs(locs:GetChildren()) do
+            if p:IsA("BasePart") and p.Name == "Can_Plant" then
+                table.insert(raw, p)
+            end
+        end
+        zoneParts = raw
+        if #raw >= 2 then
+            local function deg(c)
+                local x,y,z = (c - c.Position):ToEulerAnglesXYZ()
+                return math.floor(math.deg(x)+0.5)%360,
+                       math.floor(math.deg(y)+0.5)%360,
+                       math.floor(math.deg(z)+0.5)%360
+            end
+            local r1x,r1y,r1z = deg(raw[1].CFrame)
+            local r2x,r2y,r2z = deg(raw[2].CFrame)
+            if r1x==180 and r1y==0 and r1z==180 and r2x==180 and r2y==0 and r2z==180 then
+                zoneParts = { raw[1], raw[2] }
+            elseif r1x==0 and r1y==0 and r1z==0 and r2x==0 and r2y==0 and r2z==0 then
+                zoneParts = { raw[2], raw[1] }
+            end
+        end
+    end
+end
+
+-- Kiểm tra một cây có nằm trong zone đã chọn hay không
+-- Kiểm tra một cây có nằm trong zone đã chọn (theo bán kính) hay không
+local function inZone(mdl)
+    if #zoneParts < 2 then
+        return true
+    end
+
+    -- Lấy vị trí trung tâm model (PrimaryPart hoặc Base)
+    local root = mdl.PrimaryPart or mdl:FindFirstChild("Base")
+    if not root then
+        return true
+    end
+    local px, pz = root.Position.X, root.Position.Z
+
+    -- Giới hạn bán kính (radius) cho zone
+    local R = 35  -- bạn có thể tăng/giảm tuỳ ý
+
+    for idx, part in ipairs(zoneParts) do
+        if selectedZones["Zone "..idx] then
+            local cx, cz = part.Position.X, part.Position.Z
+            local dx, dz = px - cx, pz - cz
+            if (dx*dx + dz*dz) <= (R*R) then
+                return true
+            end
+        end
+    end
+
+    return false
+end
+
+
+
+-- ========== Phần UI ==========
+
+-- 1) Toggle
+RemoveDTKTab:AddToggle("AutoRemoveTrees", {
+    Title   = "Destroy Plants",
+    Default = config.AutoRemoveTrees,
+    Callback = function(state)
+        config.AutoRemoveTrees = state; saveConfig()
+        autoRemove = state
+
+        if autoRemove then
+            -- Thread chính
+            task.spawn(function()
+                while autoRemove do
+                    -- Mỗi giây: equip lại shovel nếu còn cây hợp lệ để phá
+                    local farm = getMyFarm()
+                    local phys = farm and farm.Important:FindFirstChild("Plants_Physical")
+                    local needShovel = false
+                    if phys then
+                        for _, mdl in ipairs(phys:GetChildren()) do
+                            if selectedPlants[mdl.Name]
+                            and inZone(mdl)
+                            and (mdl:FindFirstChild("Weight",true) or {Value=0}).Value < weightThreshold
+                            and calcPlantValue(mdl) < valueThreshold then
+                                needShovel = true
+                                break
+                            end
+                        end
+                    end
+                    if needShovel then
+                        local shovel = LocalPlayer.Backpack:FindFirstChild("Shovel [Destroy Plants]")
+                        if shovel then
+                            local cur = Humanoid:FindFirstChildOfClass("Tool")
+                            if not cur or cur.Name ~= shovel.Name then
+                                Humanoid:EquipTool(shovel)
+                            end
+                        end
+                    end
+
+                    -- Tiến hành quét & destroy
+                    if phys then
+                        for _, mdl in ipairs(phys:GetChildren()) do
+                            if not autoRemove then break end
+                            if not selectedPlants[mdl.Name] then continue end
+                            if not inZone(mdl) then continue end
+
+                            local w = mdl:FindFirstChild("Weight",true)
+                            if w and w.Value >= weightThreshold then continue end
+
+                            local val = calcPlantValue(mdl)
+                            if val >= valueThreshold then continue end
+
+                            local skip = false
+                            local fruits = mdl:FindFirstChild("Fruits")
+                            if fruits then
+                                for _, f in ipairs(fruits:GetChildren()) do
+                                    if skip then break end
+                                    for mut in pairs(blockedMutions) do
+                                        if f:GetAttribute(mut) then skip = true; break end
+                                    end
+                                end
+                            else
+                                for mut in pairs(blockedMutions) do
+                                    if mdl:GetAttribute(mut) then skip = true; break end
+                                end
+                            end
+                            if skip then continue end
+
+                            for _, part in ipairs(mdl:GetChildren()) do
+                                if not autoRemove then break end
+                                if part:IsA("BasePart") then
+                                    RemoveItemEvent:FireServer(part)
+                                    task.wait(0.01)
+                                end
+                            end
+                        end
+                    end
+
+                    task.wait(1)
+                end
+            end)
+        end
+    end
+})
+
+-- 2) Zone selector
+local zoneDropdown = RemoveDTKTab:AddDropdown("ZoneRemoveFilter", {
+    Title       = "Zone Filter",
+    Description = "Select zone to remove",
+    Values      = { "Zone 1 (right)", "Zone 2 (left)" },
+    Multi       = true,
+    Default     = config.ZoneRemoveFilter,
+    Callback    = function(sel)
+        config.ZoneRemoveFilter = sel; saveConfig()
+        selectedZones = {}
+        for k,v in pairs(sel) do
+            if v then selectedZones[k] = true end
+        end
+    end
+})
+zoneDropdown:SetValue(config.ZoneRemoveFilter)
+
+-- 3) Plants to destroy (có “All”)
+local function getUniquePlantNames()
+    local out = { "All" }
+    local farm = getMyFarm()
+    if not farm then return out end
+    local phys = farm.Important:FindFirstChild("Plants_Physical")
+    if not phys then return out end
+    local seen = {}
+    for _, mdl in ipairs(phys:GetChildren()) do
+        if mdl:IsA("Model") and not seen[mdl.Name] then
+            seen[mdl.Name] = true
+            table.insert(out, mdl.Name)
+        end
+    end
+    return out
+end
+
+plantDropdown = RemoveDTKTab:AddDropdown("PlantRemoveFilter", {
+    Title       = "Plants to destroy",
+    Description = "Plants in your garden",
+    Values      = getUniquePlantNames(),
+    Multi       = true,
+    Default     = config.PlantRemoveFilter,
+    Callback    = function(sel)
+        config.PlantRemoveFilter = sel; saveConfig()
+        selectedPlants = {}
+
+        if sel["All"] then
+            for _, name in ipairs(getUniquePlantNames()) do
+                if name ~= "All" then
+                    selectedPlants[name] = true
+                end
+            end
+        else
+            for name,on in pairs(sel) do
+                if on and name ~= "All" then
+                    selectedPlants[name] = true
+                end
+            end
+        end
+    end
+})
+plantDropdown:SetValue(config.PlantRemoveFilter)
+
+-- 4) Refresh plant list
+RemoveDTKTab:AddButton({
+    Title    = "🔄 Refresh Plant list",
+    Callback = function()
+        local opts = getUniquePlantNames()
+        plantDropdown:SetValues(opts)
+        config.PlantRemoveFilter = {}; saveConfig()
+        plantDropdown:SetValue({})
+        selectedPlants = {}
+    end
+})
+
+-- 5) Weight filter
+weightInput = RemoveDTKTab:AddInput("WeightRemoveFilter", {
+    Title       = "Weight Filter (kg)",
+    Description = "Ignore fruits ≥ x kg",
+    Placeholder = "",
+    Default     = config.WeightRemoveFilter,
+    Numeric     = true,
+    Callback    = function(v)
+        local n = tonumber(v)
+        if n then
+            weightThreshold = n
+            config.WeightRemoveFilter = v; saveConfig()
+        end
+    end
+})
+weightInput:SetValue(config.WeightRemoveFilter)
+
+-- 6) Value filter
+valueInput = RemoveDTKTab:AddInput("ValueRemoveFilter", {
+    Title       = "Value Filter ($)",
+    Description = "Ignore fruits ≥ x $",
+    Placeholder = "",
+    Default     = config.ValueRemoveFilter,
+    Numeric     = true,
+    Callback    = function(v)
+        local n = tonumber(v)
+        if n then
+            valueThreshold = n
+            config.ValueRemoveFilter = v; saveConfig()
+        end
+    end
+})
+valueInput:SetValue(config.ValueRemoveFilter)
+
+-- 7) Mutation filter
+ddMutRm = RemoveDTKTab:AddDropdown("MutationRemoveFilter", {
+    Title       = "Mutation Filter",
+    Description = "Ignore mutations",
+    Values      = allMutions,
+    Multi       = true,
+    Default     = config.MutationRemoveFilter,
+    Callback    = function(sel)
+        config.MutationRemoveFilter = sel; saveConfig()
+        blockedMutions = {}
+        for mut,on in pairs(sel) do
+            if on then blockedMutions[mut] = true end
+        end
+    end
+})
+ddMutRm:SetValue(config.MutationRemoveFilter)
+
+
+
+
+
+Section = RemoveDTKTab:AddSection("Sell Pet Inventory")
+-- Remote Sell Pet
+local SellPetRemote = ReplicatedStorage
+    :WaitForChild("GameEvents")
+    :WaitForChild("SellPet_RE")
+
+-- ======== 0) Config mặc định ========
+config.AutoSellPets      = config.AutoSellPets      or false
+config.PetsToSell        = config.PetsToSell        or { ["All (except favorite)"] = true }
+
+-- ======== 1) Hàm helper: Lấy tất cả tools chứa "Age" ========
+local function getAllAgeTools()
+    local out = {}
+    for _, container in ipairs({LocalPlayer.Backpack, Character}) do
+        if container then
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") and tool.Name:find("Age") then
+                    table.insert(out, tool)
+                end
+            end
+        end
+    end
+    return out
+end
+
+-- ======== 2) Helper: Build danh sách dropdown ========
+local function buildPetList()
+    local list = {"All (except favorite)"}
+    for _, tool in ipairs(getAllAgeTools()) do
+        table.insert(list, tool.Name)
+    end
+    return list
+end
+
+-- ======== 3) Toggle Auto Sell Pets ========
+local autoSellPets = config.AutoSellPets
+RemoveDTKTab:AddToggle("AutoSellPets", {
+    Title   = "Auto Sell Pets",
+    Default = autoSellPets,
+    Callback = function(state)
+        config.AutoSellPets = state
+        saveConfig()
+        autoSellPets = state
+
+        if state then
+            task.spawn(function()
+                while autoSellPets do
+                    -- 1) Xây danh sách tool chưa favorite
+                    local allTools = getAllAgeTools()
+                    local toSell = {}
+
+                    if config.PetsToSell["All (except favorite)"] then
+                        -- Chọn all tool chưa favorite
+                        for _, tool in ipairs(allTools) do
+                            if not tool:GetAttribute("Favorite") then
+                                table.insert(toSell, tool)
+                            end
+                        end
+                    else
+                        -- Chọn tool theo config.PetsToSell map[toolName] = true
+                        for _, tool in ipairs(allTools) do
+                            if not tool:GetAttribute("Favorite")
+                            and config.PetsToSell[tool.Name] then
+                                table.insert(toSell, tool)
+                            end
+                        end
+                    end
+
+                    -- 2) Lần lượt equip + FireServer
+                    for _, tool in ipairs(toSell) do
+                        while isTeleport do task.wait(0.02) end
+                        isTeleport = true
+                        if not autoSellPets then break end
+                        -- equip
+                        pcall(function()
+                            Humanoid:EquipTool(tool)
+                        end)
+                        task.wait(0.05)
+                        -- gọi remote với tool đang cầm
+                        pcall(function()
+                            SellPetRemote:FireServer(tool)
+                        end)
+                        task.wait(0.1)
+                        isTeleport = false
+                    end
+
+                    task.wait(0.5)
+                end
+            end)
+        end
+    end
+})
+
+-- ======== 4) Dropdown chọn pets to sell ========
+local petList = buildPetList()
+ddPets = RemoveDTKTab:AddDropdown("PetsToSell", {
+    Title       = "Pets to Sell",
+    Description = "Except favorite Pets",
+    Values      = petList,
+    Multi       = true,
+    Default     = config.PetsToSell,
+    Callback    = function(selection)
+        config.PetsToSell = selection
+        saveConfig()
+    end
+})
+ddPets:SetValue(config.PetsToSell)
+
+-- ======== 5) Button Refresh danh sách pets ========
+RemoveDTKTab:AddButton({
+    Title       = "🔄 Refresh Pets List",
+    Description = "",
+    Callback    = function()
+        local newList = buildPetList()
+        ddPets:SetValues(newList)
+        ddPets:SetValue(config.PetsToSell)
+
+    end
+})
+
+
+
+
+
+Section = FavoriteDTKTab:AddSection("Favorite Pets")
+-- 0) Config & Require
+config.AutoFavPets     = config.AutoFavPets     or false
+config.PetFavSelection = config.PetFavSelection or {}    -- map[name]=true
+
+-- Remote
+local favRemote = ReplicatedStorage
+    :WaitForChild("GameEvents")
+    :WaitForChild("Favorite_Item")
+
+-- 1) Hàm check một tool có match selection không
+local function toolMatchesSelection(toolName)
+    -- duyệt qua các key trong config.PetFavSelection
+    for selectedName, on in pairs(config.PetFavSelection) do
+        if on then
+            -- so sánh lowercase, tránh phân biệt hoa thường
+            if string.lower(toolName):find(string.lower(selectedName)) then
+                return true
+            end
+        end
+    end
+    return false
+end
+
+-- 2) UI: Dropdown chọn pet keyword
+local allPetKeywords = {
+    "Queen Bee","Bear Bee", "Petal Bee","Dragonfly","Raccoon","Red Giant Ant","Giant Ant","Mole","Praying Mantis",
+    "Caterpillar","Snail","Echo Frog","Cow","Sea Otter","Moon Cat","Silver Monkey",
+    "Squirrel","Chicken Zombie","Frog","Monkey","Pig","Grey Mouse","Blood Hedgehog",
+    "Hedgehog","Panda","Turtle","Golden Lab","Owl","Polar Bear","Blood Kiwi","Kiwi",
+    "Rooster","Blood Owl","Brown Mouse","Night Owl","Orange Tabby","Spotted Deer",
+    "Cat","Chicken","Deer","Black Bunny","Bunny","Dog","Firefly","Bee","Honey Bee"
+}
+
+ddPets = FavoriteDTKTab:AddDropdown("PetFavSelection", {
+    Title       = "Select Pets to Favorite",
+    Description = "",
+    Values      = allPetKeywords,
+    Multi       = true,
+    Default     = config.PetFavSelection,
+    Callback    = function(selection)
+        config.PetFavSelection = selection
+        saveConfig()
+    end
+})
+ddPets:SetValue(config.PetFavSelection)
+
+-- 3) Toggle Auto Favorite Pets
+FavoriteDTKTab:AddToggle("AutoFavPets", {
+    Title   = "Auto Favorite Pets",
+    Default = config.AutoFavPets,
+    Callback = function(state)
+        config.AutoFavPets = state
+        saveConfig()
+        autoFavPets = state
+
+        if autoFavPets then
+            task.spawn(function()
+                local processed = {} -- để tránh favorite trùng
+                while autoFavPets do
+                    for _,tool in ipairs(LocalPlayer.Backpack:GetChildren()) do
+                        if not tool:IsA("Tool") then
+                            continue
+                        end
+
+                        local name = tool.Name
+                        -- 1) Tool phải match với dropdown selection
+                        if not toolMatchesSelection(name) then
+                            continue
+                        end
+
+                        -- 2) Tool chưa được processed và chưa favorite (Attribute)
+                        if processed[tool] then
+                            continue
+                        end
+                        if tool:GetAttribute("Favorite") then
+                            processed[tool] = true
+                            continue
+                        end
+
+                        -- 3) Gọi remote favorite
+                        pcall(function()
+                            favRemote:FireServer(tool)
+                        end)
+                        processed[tool] = true
+                        -- dành chút thời gian để game kịp xử lý
+                        task.wait(0.1)
+                    end
+
+                    -- Dọn dẹp processed map: loại bỏ tool đã bị xoá (sell, drop…)
+                    for t,_ in pairs(processed) do
+                        if not t.Parent then
+                            processed[t] = nil
+                        end
+                    end
+
+                    task.wait(0.1)
+                end
+            end)
+        end
+    end
+})
+-- … (phần code ở trên) …
+
+-- 4) Button: Unfavorite All Pets
+FavoriteDTKTab:AddButton({
+    Title       = "Unfavorite All Pets",
+    Description = "",
+    Callback    = function()
+        local favRemote = ReplicatedStorage
+            :WaitForChild("GameEvents")
+            :WaitForChild("Favorite_Item")
+
+        -- Duyệt cả Backpack và Character
+        local function processContainer(container)
+            for _, tool in ipairs(container:GetChildren()) do
+                if tool:IsA("Tool") then
+                    local nameLower = tool.Name:lower()
+                    -- chỉ quan tâm tool có "age" và attribute Favorite == true
+                    if nameLower:find("age") and tool:GetAttribute("Favorite") then
+                        -- Gọi remote với chính instance tool đó
+                        pcall(function()
+                            favRemote:FireServer(tool)
+                        end)
+                        task.wait(0.05)
+                    end
+                end
+            end
+        end
+
+        -- Unfavorite trong Backpack
+        processContainer(LocalPlayer.Backpack)
+        -- Unfavorite trên Character (nếu đang cầm tool)
+        processContainer(LocalPlayer.Character or {})
+
+
+    end
+})
+
+
+
+-- Khởi config lần đầu
+config.ReduceGraphics = config.ReduceGraphics or false
+
+-- Toggle Reduce Graphics
+reduceToggle = ServerDTKTab:AddToggle("ReduceGraphics", {
+    Title   = "Reduce Graphics",
+    Default = config.ReduceGraphics,
+    Callback = function(state)
+        config.ReduceGraphics = state
+        saveConfig()
+
+        if state then
+            -- 1) Danh sách tên container cần xử lý
+            local containerNames = {
+                "TopBaseplate",
+                "Visuals",
+                "PetsPhysical",
+                "Farm",
+                "Interaction"
+            }
+
+            -- 2) Gom container instances (chờ tối đa 5s mỗi cái)
+            local containers = {}
+            for _, name in ipairs(containerNames) do
+                local ok, inst = pcall(function()
+                    return workspace:WaitForChild(name, 5)
+                end)
+                if ok and inst then
+                    containers[#containers+1] = inst
+                else
+                    warn((""):format(name))
+                end
+            end
+
+            -- 3) Set đã xử lý để không set lại chồng chéo
+            local known = {}
+
+            -- 4) Hàm đổi material + tắt cast shadow
+            local function reduce(part)
+                if part:IsA("BasePart") and not known[part] then
+                    part.Material   = Enum.Material.SmoothPlastic
+                    part.CastShadow = false
+                    known[part]     = true
+                end
+            end
+
+            -- 5) Quét một lượt tất cả container và descendants
+            for _, cont in ipairs(containers) do
+                -- 5a) Nếu chính nó là Part thì xử lý luôn
+                reduce(cont)
+                -- 5b) Quét descendants
+                for _, desc in ipairs(cont:GetDescendants()) do
+                    reduce(desc)
+                end
+            end
+
+            -- 6) Đăng listener cho mỗi container, bắt phần tử mới
+            for _, cont in ipairs(containers) do
+                cont.DescendantAdded:Connect(function(inst)
+                    reduce(inst)
+                end)
+            end
+
+
+        else
+
+            -- Lưu ý: các Part đã chuyển sang Air + tắt đổ bóng sẽ không tự phục hồi.
+        end
+    end
+})
+
+-- Khởi toggle theo config
+reduceToggle:SetValue(config.ReduceGraphics)
+
+
+
+
+
+
+
+
+
+
+-- Khởi mặc định config
+config.CustomWalkSpeed    = config.CustomWalkSpeed    or false
+config.WalkSpeedMultiplier = config.WalkSpeedMultiplier or 1
+
+config.CustomJumpPower    = config.CustomJumpPower    or false
+config.JumpPowerMultiplier = config.JumpPowerMultiplier or 1
+
+config.FlyEnabled         = config.FlyEnabled         or false
+
+----------------------------------------------------------------
+-- 1) WalkSpeed Toggle + Slider
+----------------------------------------------------------------
+local walkToggleActive = false
+local walkSliderValue  = 1
+
+-- Giá trị mặc định
+local DEFAULT_WALKSPEED = 20
+-- 3) Fly Toggle
+----------------------------------------------------------------
+MiscDTKTab:AddToggle("fly", {
+    Title   = "Fly",
+    Default = config.FlyEnabled,
+    Callback = function(val)
+        flyEnabled = val
+        config.FlyEnabled = val
+        saveConfig()
+
+        local player = game.Players.LocalPlayer
+        local cam    = workspace.CurrentCamera
+        local uis    = game:GetService("UserInputService")
+        local rs     = game:GetService("RunService")
+
+        local flying  = false
+
+        if val then
+            task.spawn(function()
+                flying = true
+                while flyEnabled and flying do
+                    local root = player.Character and player.Character:FindFirstChild("HumanoidRootPart")
+                    if root then
+                        local dir = Vector3.new()
+                        if uis:IsKeyDown(Enum.KeyCode.W) then dir += cam.CFrame.LookVector end
+                        if uis:IsKeyDown(Enum.KeyCode.S) then dir -= cam.CFrame.LookVector end
+                        if uis:IsKeyDown(Enum.KeyCode.A) then dir -= cam.CFrame.RightVector end
+                        if uis:IsKeyDown(Enum.KeyCode.D) then dir += cam.CFrame.RightVector end
+                        if uis:IsKeyDown(Enum.KeyCode.Space) then dir += cam.CFrame.UpVector end
+                        if uis:IsKeyDown(Enum.KeyCode.LeftShift) then dir -= cam.CFrame.UpVector end
+
+                        if dir.Magnitude > 0 then
+                            dir = dir.Unit * 50
+                        end
+                        root.Velocity = dir
+                    end
+                    rs.RenderStepped:Wait()
+                end
+            end)
+        else
+            flying = false
+        end
+    end
+})
+
+
+-- Toggle WalkSpeed
+MiscDTKTab:AddToggle("WalkSpeedToggle", {
+    Title   = "Walk Speed",
+    Default = config.CustomWalkSpeed,
+    Callback = function(state)
+        walkToggleActive = state
+        config.CustomWalkSpeed = state
+        saveConfig()
+
+        if not walkToggleActive then
+            Humanoid.WalkSpeed = DEFAULT_WALKSPEED
+        else
+            Humanoid.WalkSpeed = walkSliderValue * DEFAULT_WALKSPEED
+        end
+    end
+})
+
+-- Slider WalkSpeed
+speedslider = MiscDTKTab:AddSlider("WalkSpeedSlider", {
+    Title   = "WalkSpeed Multiplier",
+    Min     = 1,
+    Max     = 20,
+    Default = config.WalkSpeedMultiplier,
+    Rounding= 0,
+    Callback = function(val)
+        walkSliderValue = val
+        config.WalkSpeedMultiplier = val
+        saveConfig()
+
+        if walkToggleActive then
+            Humanoid.WalkSpeed = walkSliderValue * DEFAULT_WALKSPEED
+        end
+    end
+})
+-- Gán lại giá trị slider từ config khi load GUI
+speedslider:SetValue(config.WalkSpeedMultiplier)
+----------------------------------------------------------------
+-- 2) JumpPower Toggle + Slider
+----------------------------------------------------------------
+local jumpToggleActive = false
+local jumpSliderValue  = 1
+
+-- Giá trị mặc định
+local DEFAULT_JUMPPOWER = 50
+
+-- Toggle JumpPower
+MiscDTKTab:AddToggle("JumpPowerToggle", {
+    Title   = "Jump Power",
+    Default = config.CustomJumpPower,
+    Callback = function(state)
+        jumpToggleActive = state
+        config.CustomJumpPower = state
+        saveConfig()
+
+        if not jumpToggleActive then
+            Humanoid.JumpPower = DEFAULT_JUMPPOWER
+        else
+            Humanoid.JumpPower = jumpSliderValue * DEFAULT_JUMPPOWER
+        end
+    end
+})
+
+-- Slider JumpPower
+jumpslider = MiscDTKTab:AddSlider("JumpPowerSlider", {
+    Title   = "JumpPower Multiplier",
+    Min     = 1,
+    Max     = 10,
+    Default = config.JumpPowerMultiplier,
+    Rounding= 0,
+    Callback = function(val)
+        jumpSliderValue = val
+        config.JumpPowerMultiplier = val
+        saveConfig()
+
+        if jumpToggleActive then
+            Humanoid.JumpPower = jumpSliderValue * DEFAULT_JUMPPOWER
+        end
+    end
+})
+-- Gán lại giá trị slider từ config khi load GUI
+jumpslider:SetValue(config.JumpPowerMultiplier)
+----------------------------------------------------------------
+
+local player = Players.LocalPlayer
+local gui = Instance.new("ScreenGui")
+gui.Name = "OpenButtonGui"
+gui.ResetOnSpawn = false
+gui.IgnoreGuiInset = true
+gui.Parent = player:WaitForChild("PlayerGui")
+
+local button = Instance.new("ImageButton")
+button.Size = UDim2.new(0, 50, 0, 50)
+button.Position = UDim2.new(0, 20, 0, 250)
+button.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
+button.BackgroundTransparency = 0.25
+button.Image = "rbxassetid://128961717706452" -- Để trống hoặc dùng icon tròn tùy bạn
+button.Name = "FloatingToggle"
+button.Active = true
+button.Draggable = true
+button.Parent = gui
+
+-- Làm nút thành hình tròn
+local corner = Instance.new("UICorner")
+corner.CornerRadius = UDim.new(1, 0)
+corner.Parent = button
+
+-- Khi nhấn vào, giả lập nhấn RightControl
+button.MouseButton1Click:Connect(function()
+    VirtualInputManager:SendKeyEvent(true, Enum.KeyCode.LeftControl, false, game)
+    task.wait(0.05)
+    VirtualInputManager:SendKeyEvent(false, Enum.KeyCode.LeftControl, false, game)
+end)
